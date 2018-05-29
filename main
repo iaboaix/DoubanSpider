@@ -1,0 +1,162 @@
+"""
+ * @author 党智腾
+ * mail 642212607@qq.com
+ * WeChat dangzhiteng
+ * @date 2018-05-14
+ * @version V 1.0
+"""
+
+
+import re
+import json
+import time
+import random
+import requests
+from threading import Thread
+from multiprocessing import Process, Queue, cpu_count
+from bs4 import BeautifulSoup
+
+
+headers = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+           'Accept-Encoding': 'gzip, deflate, br',
+           'Accept-Language': 'zh-CN,zh;q=0.9',
+           'Cache-Control': 'max-age=0',
+           'Connection': 'keep-alive',
+           'Host': 'movie.douban.com',
+           'Referer': 'https://movie.douban.com/',
+           'Upgrade-Insecure-Requests': '1',
+           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                         ' AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.186 Safari/537.36'}
+sourceurl = "https://movie.douban.com/subject/26945085/reviews"
+processnum = cpu_count()  # CPU数目，决定开启几个进程
+number = 0  # 计数
+reviewpool = []  # 评论池
+
+# 更新IP池
+def refreship():
+    proxiespool = []
+    myip = '220.202.152.95'
+    testurl = 'http://2018.ip138.com/ic.asp'
+    url = 'http://www.xicidaili.com/'  # 西刺代理IP
+    header = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                      'AppleWebKit/537.36 (KHTML, like Gecko) '
+                      'Chrome/64.0.3282.186 Safari/537.36'}
+    html = requests.get(url, headers=header)
+    pattern = re.compile('<td>\d+.\d+.\d+.\d+</td>\n    <td>\d+</td>')
+    result = re.findall(pattern, html.text)
+    f = open('IP池2.txt', 'w+')
+    for i in range(len(result)):
+        item = result[i]
+        ip = re.search('\d+.\d+.\d+.\d+', item).group()
+        port = re.search('\d+</td>$', item).group()[:-5]
+        try:
+            proxies = {'http': 'http://' + ip + ':' + port}
+            testhtml = requests.get(testurl, proxies=proxies)
+        except:
+            proxies = {'https': 'https://' + ip + ':' + port}
+            testhtml = requests.get(testurl, proxies=proxies)
+        try:
+            current = testhtml.content.decode('gbk')
+        except UnicodeError:
+            print('编码失败')
+            continue
+        currentip = re.search('\d+.\d+.\d+.\d+', current).group()
+        if currentip != myip:
+            print(str(i + 1)+'.', ip + ':' + port, '代理成功')
+            proxiespool.append(proxies)
+            f.write(json.dumps(proxies))
+            f.write('\n')
+        else:
+            print(i+'.', ip + ':' + port, '代理失败')
+    f.close()
+    print('代理池更新完毕,新代理池大小为:'+str(len(proxiespool)))
+    return proxiespool
+
+
+# 爬取电影基本信息 创建评论ID队列
+def douban_spider(url=sourceurl):
+    proxiespool = []  # 读取IP代理池
+    with open('IP池.txt', 'r', encoding='utf-8') as proxiesfile:
+        for line in proxiesfile:
+            proxiespool.append(json.loads(line))
+    print('IP池：', proxiespool)
+    starthtml = requests.get(url, headers=headers)
+    starthtml = starthtml.content.decode()
+    soup = BeautifulSoup(starthtml, 'html.parser')
+    f = open('影评.txt', 'w', encoding='utf-8')
+    star = soup.find(class_="droplist").find_all('a')
+    f.write(soup.title.string.strip() + '\n')
+    for item in star:
+        f.write(item.string.strip() + ' '*5)
+    f.write('\n\n')
+    num = re.search('\d+', soup.title.string.strip()).group()
+    num = int(num) // 20 + 1
+    idqueue = Queue(30)  # 评论ID队列
+    thread = Thread(target=getreview, args=(num, idqueue, proxiespool))
+    thread.start()
+    processtitle = ('一号进程', '二号进程', '三号进程', '四号进程', '五号进程', '六号进程', '七号进程', '八号进程')
+    for i in range(processnum):
+        spider = Spider(processtitle[i], idqueue, proxiespool, daemon = True)
+        spider.start()
+
+
+# 填充评论ID队列线程
+def getreview(num, idqueue, proxiespool):
+    for i in range(num):
+        currenturl = sourceurl + '?start={}'.format(20 * i)
+        print('正在爬取第' + str(i + 1) + '页ID')
+        proxies = proxiespool[random.randint(0, len(proxiespool) - 1)]
+        html = requests.get(currenturl, proxies=proxies)
+        soup = BeautifulSoup(html.content, 'html.parser')
+        idinfo = soup.find_all(class_="main-bd")  # 提取评论ID
+        for i in range(len(idinfo)):
+            reviewid = idinfo[i].find(class_="review-short")['data-rid']
+            idqueue.put(reviewid)
+            print(reviewid, '进入队列')
+            if i == 30:
+                break
+
+# 获取评论进程
+class Spider(Process):
+    def __init__(self, name, queue, proxiespool):
+        Process.__init__(self)
+        # super(Spider, self).__init__()
+        self.name = name
+        self.queue = queue
+        self.proxiespool = proxiespool
+        self.reviewid = self.queue.get(timeout=2)
+
+    def run(self):
+        while not self.queue.empty():
+            self.getreview()
+        print(self.name, '已终止...')
+
+    def getreview(self):
+        global number
+        number = number + 1
+        print(self.name, '正在爬取当前页第', number, '条影评', 'id为', self.reviewid)
+        proxies = self.proxiespool[random.randint(0, len(self.proxiespool) - 1)]
+        reviewurl = 'https://movie.douban.com/j/review/{0}/full'.format(self.reviewid)
+        reviewhtml = requests.get(reviewurl, proxies=proxies)
+        js = json.loads(reviewhtml.text)  # js = data.content.decode()
+        html = js['body']
+        soup = BeautifulSoup(html, 'html.parser').find(class_="review-content clearfix")
+        title = soup["data-author"]
+        review = soup.find_all('p')
+        with open('影评.txt', 'w+', encoding='utf8') as f:
+            f.write(title + '\n')
+            for item in review:
+                try:
+                    if item.string is not None:
+                        f.write(item.string)
+                except IOError:
+                    print('写入文件失败')
+            f.write('\n\n')
+        time.sleep(3)
+        self.reviewid = self.queue.get(timeout=2)
+
+
+# 启动爬虫(需更新ip代理池时，请更换函数为refreship)
+if __name__ == '__main__':
+    douban_spider()
