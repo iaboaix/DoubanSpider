@@ -2,8 +2,8 @@
  * @author 党智腾
  * mail 642212607@qq.com
  * WeChat dangzhiteng
- * @date 2018-05-30
- * @version V 1.0
+ * @date 2018-06-01
+ * @version V 2.0
 """
 
 import re
@@ -27,11 +27,11 @@ headers = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,imag
            'Upgrade-Insecure-Requests': '1',
            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
                          ' AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.186 Safari/537.36'}
-sourceurl = "https://movie.douban.com/subject/26945085/reviews"
 processnum = cpu_count()  # CPU数目，决定开启几个进程
 number = 0  # 计数
-reviewpool = []  # 评论池
 databuffer = Queue(100)
+#    url = "https://movie.douban.com/subject/{0}/".format(id)
+
 
 # 更新IP池
 def refreship():
@@ -65,71 +65,93 @@ def refreship():
         current = testhtml.text
         currentip = re.search('\d+.\d+.\d+.\d+', current).group()
         if currentip != myip:
-            print(str(i + 1)+'.', ip + ':' + port, '代理成功')
+            print(str(i + 1) + '.', ip + ':' + port, '代理成功')
             proxiespool.append(proxies)
             f.write(json.dumps(proxies))
+            f.write('\n')
         else:
-            print(i+'.', ip + ':' + port, '代理失败')
+            print(str(i + 1) + '.', ip + ':' + port, '代理失败')
     f.close()
     print('代理池更新完毕,新代理池大小为:'+str(len(proxiespool)))
     return proxiespool
 
 
 # 爬取电影基本信息 创建评论ID队列
-def douban_spider(url=sourceurl):
+def douban_spider(filmid, strategy):
     proxiespool = []  # 读取IP代理池
     with open('IP池.txt', 'r', encoding='utf-8') as proxiesfile:
         for line in proxiesfile:
             proxiespool.append(json.loads(line))
     print('该电脑为', str(processnum), '核,即将开启' + str(processnum) + '进程...')
     print('代理IP池：', proxiespool)
-    starthtml = requests.get(url, headers=headers)
-    starthtml = starthtml.content.decode()
-    soup = BeautifulSoup(starthtml, 'html.parser')
-    f = open('影评.txt', 'w', encoding='utf-8')
-    star = soup.find(class_="droplist").find_all('a')
-    f.write(soup.title.string.strip() + '\n')
-    for item in star:
-        f.write(item.string.strip() + ' '*5)
-    f.write('\n\n')
-    f.close()
-    num = re.search('\d+', soup.title.string.strip()).group()
-    num = int(num) // 20 + 1
-    idqueue = Queue(processnum * 20)  # 评论ID队列
-    threadid = Thread(target=getreview, args=(num, idqueue, proxiespool))
-    threadid.start()
-    threadwrite = Thread(target=writefile)
-    threadwrite.start()
-    processtitle = ('一号进程', '二号进程', '三号进程', '四号进程', '五号进程', '六号进程', '七号进程', '八号进程')
-    for i in range(processnum):
-        spider = Spider(processtitle[i], idqueue, proxiespool)
-        spider.daemon = True
-        spider.start()
+    url = "https://movie.douban.com/subject/{0}/{1}".format(filmid, strategy)
+    if strategy == 'reviews':
+        # 写入头信息
+        starthtml = requests.get(url, headers=headers)
+        starthtml = starthtml.content.decode()
+        soup = BeautifulSoup(starthtml, 'html.parser')
+        count = re.search('\d+', soup.title.string.strip()).group()
+        num = int(count) // 20 + 1
+        del soup, starthtml, count
+        # 结束写入
+        idqueue = Queue(processnum * 20)  # 评论ID队列
+        # 启动填充ID线程
+        threadid = Thread(target=getreview, args=(num, idqueue, proxiespool))
+        threadid.start()
+        # 启动监控数据缓冲区线程
+        threadwrite = Thread(target=writefile)
+        threadwrite.start()
+        processtitle = ('一号进程', '二号进程', '三号进程', '四号进程', '五号进程', '六号进程', '七号进程', '八号进程')
+        # 启动爬虫进程
+        for i in range(processnum):
+            spider = ReviewsSpider(processtitle[i], idqueue, proxiespool)
+            spider.daemon = True
+            spider.start()
+    else:
+        # 启动填充段评论url线程
+        urlqueue = Queue(processnum * 20)  # 评论ID队列
+        threadurl = Thread(target=getcomment, args=(url, urlqueue))
+        threadurl.start()
+        # 启动监控数据缓冲区线程
+        threadwrite = Thread(target=writefile)
+        threadwrite.start()
+        processtitle = ('一号进程', '二号进程', '三号进程', '四号进程', '五号进程', '六号进程', '七号进程', '八号进程')
+        # 启动爬虫进程
+        for i in range(processnum):
+            spider = CommentsSpider(processtitle[i], urlqueue, proxiespool)
+            spider.daemon = True
+            spider.start()
 
 
-# 填充评论ID队列线程
+# 未登录只可爬取200条短评 登录可爬取500条
+# 填充段评论url线程
+def getcomment(sourceurl, urlqueue):
+    for i in range(10):
+        currenturl = sourceurl + '?start={0}&limit=20&sort=new_score&status=P&percent_type='.format(20 * i)
+        urlqueue.put(currenturl)
+
+
+# 填充长评论ID队列线程
 def getreview(num, idqueue, proxiespool):
     for i in range(num):
-        currenturl = sourceurl + '?start={}'.format(20 * i)
+        currenturl = "https://movie.douban.com/subject/26945085/reviews" + '?start={}'.format(20 * i)
         while True:
             try:
                 proxies = proxiespool[random.randint(0, len(proxiespool) - 1)]
-                html = requests.get(currenturl, proxies=proxies, timeout = 20)
+                html = requests.get(currenturl, proxies=proxies, timeout=3)
                 break
             except ConnectionError:
                 print(proxies, '失效')
                 pass
         soup = BeautifulSoup(html.content, 'html.parser')
-        idinfo = soup.find_all(class_="main-bd")  # 提取评论ID
-        for j in range(len(idinfo)):
-            reviewid = idinfo[j].find(class_="review-short")['data-rid']
+        idinfo = soup.find_all(class_="review-item")  # 提取评论ID
+        for item in idinfo:
+            reviewid = item.find(class_="review-short")['data-rid']
             idqueue.put(reviewid)
-        if i == 0:
-            break
 
 
-# 获取评论并将评论写入数据缓冲队列进程
-class Spider(Process):
+# 获取长评论并将长评论写入数据缓冲队列进程
+class ReviewsSpider(Process):
     reviewid = 0
 
     def __init__(self, name, queue, proxiespool):
@@ -149,7 +171,7 @@ class Spider(Process):
         while not self.queue.empty():
             try:
                 self.reviewid = self.queue.get(timeout=5)
-            except StopIteration:
+            except:
                 break
             proxies = self.proxiespool[random.randint(0, len(self.proxiespool) - 1)]
             reviewurl = 'https://movie.douban.com/j/review/{0}/full'.format(self.reviewid)
@@ -168,14 +190,50 @@ class Spider(Process):
             print(self.name, '爬取完成影评', self.reviewid, '。程序已运行', str(time.time() - start))
 
 
+# 获取短评论并将短评论写入数据缓冲队列进程
+class CommentsSpider(Process):
+    def __init__(self, name, queue, proxiespool):
+        Process.__init__(self)
+        # super(Spider, self).__init__()
+        self.name = name
+        self.queue = queue
+        self.proxiespool = proxiespool
+        self.databuffer = databuffer
+
+    def run(self):
+        self.getreview()
+        print(self.name, '已终止...')
+
+    def getreview(self):
+        time.sleep(2)
+        while not self.queue.empty():
+            try:
+                url = self.queue.get(timeout=5)
+            except:
+                break
+            proxies = self.proxiespool[random.randint(0, len(self.proxiespool) - 1)]
+            commentshtml = requests.get(url, proxies=proxies)
+            soup = BeautifulSoup(commentshtml.text, 'html.parser')
+            commentlist = soup.find_all(class_='comment-item')
+            for item in commentlist:
+                commentid = item["data-cid"].strip()
+                username = item.a['title'].strip()
+                votes = item.find(class_='votes').string.strip()
+                comtime = item.find(class_="comment-time ")["title"].strip()
+                comment = item.find('p').text.strip()
+                self.databuffer.put('用户名:' + username + ' '*5 + '评论ID:' + commentid + ' '*5 + '投票数目:' +
+                                    votes + ' '*5 + '评论时间:' + comtime + '\n' + comment)
+                print(self.name, '爬取完成影评', commentid, '。程序已运行', str(time.time() - start))
+
+
 # 监控数据缓冲区线程
 def writefile():
     with open('影评.txt', 'w+', encoding='utf8') as f:
         while True:
             try:
-                review = databuffer.get(timeout=5)
+                review = databuffer.get(timeout=10)
                 f.write(review + '\n\n')
-            except StopIteration:
+            except:
                 print('评论队列已空')
                 break
     print('评论写入完毕')
@@ -183,8 +241,23 @@ def writefile():
 
 # 启动爬虫
 if __name__ == '__main__':
-    fun = input('请输入 1）更新IP池 2）开启爬虫')
+    print('     ****************豆瓣影评爬取小程序V1.0****************     \n')
+    fun = input('请选择(第一次请刷新IP池) 1）更新IP池 2）开启爬虫\n')
+    while True:
+        if fun in ['1', '2']:
+            break
+        else:
+            print('请重新输入 1）更新IP池 2）开启爬虫')
+            fun = input()
     if fun == '1':
         refreship()
     else:
-        douban_spider()
+        filmid = input("请输入电影ID:\n")
+        strategy = input("请输入爬取策略(reviews/comments):\n")
+        while True:
+            if strategy in ['reviews', 'comments']:
+                break
+            else:
+                print("请正确输入爬取策略(reviews/comments):\n")
+                strategy = input()
+        douban_spider(filmid, strategy)
